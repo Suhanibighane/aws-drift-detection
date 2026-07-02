@@ -1,0 +1,21 @@
+# AWS SAM build directory
+.aws-sam/
+
+# Local databases and logs
+local_db.json
+
+# Node modules
+node_modules/
+dashboard/node_modules/
+dashboard/dist/
+
+# Python cache and byte-code files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# OS metadata
+.DS_Store
+Thumbs.db

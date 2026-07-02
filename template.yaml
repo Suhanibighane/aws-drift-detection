@@ -1,0 +1,146 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Infrastructure Drift Detection & AI-Response System
+
+Parameters:
+  TargetStackName:
+    Type: String
+    Description: Name of the AWS CloudFormation stack to monitor for drift.
+  BedrockModelId:
+    Type: String
+    Default: 'meta.llama3-8b-instruct-v1:0'
+    Description: Amazon Bedrock Model ID to use for drift description (e.g. meta.llama3-8b-instruct-v1:0 or amazon.titan-text-lite-v1).
+  AlertEmail:
+    Type: String
+    Description: Email address to send real-time drift alerts to.
+
+Globals:
+  Function:
+    Runtime: python3.9
+    Timeout: 90
+    MemorySize: 256
+    Environment:
+      Variables:
+        DYNAMODB_TABLE: !Ref DriftHistoryTable
+        SNS_TOPIC_ARN: !Ref DriftAlertTopic
+        BEDROCK_MODEL_ID: !Ref BedrockModelId
+        TARGET_STACK_NAME: !Ref TargetStackName
+
+Resources:
+  # 1. DynamoDB Table for Drift History
+  DriftHistoryTable:
+    Type: AWS::Serverless::SimpleTable
+    Properties:
+      TableName: DriftHistory
+      PrimaryKey:
+        Name: StackName
+        Type: String
+      # Add sort key if using full CloudFormation/DynamoDB, but SAM SimpleTable is partition-key only.
+      # To support composite keys (StackName + Timestamp), we use the full resource definition:
+  
+  # Redefining for composite key support
+  DriftHistoryTableComposite:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: DriftHistory
+      AttributeDefinitions:
+        - AttributeName: StackName
+          AttributeType: S
+        - AttributeName: Timestamp
+          AttributeType: S
+      KeySchema:
+        - AttributeName: StackName
+          KeyType: HASH
+        - AttributeName: Timestamp
+          KeyType: RANGE
+      BillingMode: PAY_PER_REQUEST
+
+  # 2. SNS Topic for Email Alerts
+  DriftAlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: AWS Infrastructure Drift Alerts
+
+  DriftEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref DriftAlertTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
+  # 3. Core Drift Detector Lambda Function
+  DriftDetectorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: lambda_functions/
+      Handler: drift_detector.lambda_handler
+      Policies:
+        # Permission to write to DynamoDB
+        - DynamoDBWritePolicy:
+            TableName: !Ref DriftHistoryTableComposite
+        # Permission to publish to the SNS Topic
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt DriftAlertTopic.TopicName
+        # CloudFormation permissions to detect drift
+        - Statement:
+            - Effect: Allow
+              Action:
+                - cloudformation:DetectStackDrift
+                - cloudformation:DescribeStackDriftDetectionStatus
+                - cloudformation:DescribeStackResourceDrifts
+                - cloudformation:DescribeStacks
+              Resource: '*'
+        # Bedrock permissions to invoke model
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+              Resource: '*'
+      Environment:
+        Variables:
+          DYNAMODB_TABLE: !Ref DriftHistoryTableComposite
+      Events:
+        # Trigger: EventBridge Scheduler (every 15 minutes)
+        SchedulerTrigger:
+          Type: Schedule
+          Properties:
+            Schedule: rate(15 minutes)
+            Description: Check for stack drift every 15 minutes
+            Enabled: True
+        # Trigger: API Gateway POST for manual check
+        ManualCheckApi:
+          Type: Api
+          Properties:
+            Path: /check
+            Method: post
+
+  # 4. History Retriever Lambda Function
+  HistoryRetrieverFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: lambda_functions/
+      Handler: history_retriever.lambda_handler
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref DriftHistoryTableComposite
+      Environment:
+        Variables:
+          DYNAMODB_TABLE: !Ref DriftHistoryTableComposite
+      Events:
+        # Trigger: API Gateway GET for fetching history
+        GetHistoryApi:
+          Type: Api
+          Properties:
+            Path: /history
+            Method: get
+
+Outputs:
+  ApiEndpoint:
+    Description: API Gateway Endpoint URL for the UI Dashboard
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod"
+  SnsTopicArn:
+    Description: SNS Topic ARN for Alerts
+    Value: !Ref DriftAlertTopic
+  DynamoDBTableName:
+    Description: DynamoDB Table Name
+    Value: !Ref DriftHistoryTableComposite
